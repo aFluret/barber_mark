@@ -1,0 +1,177 @@
+"""
+/**
+ * @file: booking.py
+ * @description: FSM-логика сценария записи клиента (дата/время/подтверждение)
+ * @dependencies: app.services.booking_service, bot.keyboards.booking, bot.handlers.states
+ * @created: 2026-03-23
+ */
+"""
+
+from __future__ import annotations
+
+from datetime import date, timedelta
+
+from aiogram import F, Router
+from aiogram.fsm.context import FSMContext
+from aiogram.types import CallbackQuery, Message
+
+from src.app.services.booking_service import (
+    BookingAlreadyExistsError,
+    BookingService,
+)
+from src.infra.db.repositories.appointments_repository import SlotUnavailableError
+from src.app.services.schedule_service import ScheduleService
+from src.bot.handlers.states import BookingStates
+from src.bot.keyboards.booking import (
+    confirm_booking_keyboard,
+    date_picker_keyboard,
+    time_picker_keyboard,
+)
+from src.bot.keyboards.main_menu import main_menu_keyboard
+
+router = Router()
+booking_service = BookingService()
+schedule_service = ScheduleService()
+
+
+def _next_working_dates(count: int) -> list[date]:
+    today = date.today()
+    out: list[date] = []
+    d = today
+    while len(out) < count:
+        if schedule_service.is_working_day(d):
+            out.append(d)
+        d += timedelta(days=1)
+    return out
+
+
+@router.message(F.text == "📅 Записаться")
+async def start_booking(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    user_id = message.from_user.id
+    existing = await booking_service.get_user(user_id)
+    if existing is None:
+        await message.answer("Сначала пройдите регистрацию: нажмите /start.")
+        return
+
+    await state.set_state(BookingStates.waiting_date)
+
+    dates = _next_working_dates(7)
+    if not dates:
+        await message.answer("На ближайшее время рабочие дни недоступны.")
+        return
+
+    await message.answer(
+        "Выберите дату для записи:",
+        reply_markup=date_picker_keyboard(dates),
+    )
+
+
+@router.callback_query(F.data.startswith("bk_date:"))
+async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
+    payload = callback.data.split(":", 1)[1]
+    try:
+        target_date = date.fromisoformat(payload)
+    except ValueError:
+        await callback.answer("Некорректная дата.", show_alert=True)
+        return
+
+    await state.update_data(booking_date=target_date.isoformat())
+    await state.set_state(BookingStates.waiting_time)
+
+    slots = await booking_service.list_available_time_slots(target_date)
+    if not slots:
+        await callback.message.answer("На выбранную дату свободных слотов нет. Выберите другую дату.")
+        await state.set_state(BookingStates.waiting_date)
+        dates = _next_working_dates(7)
+        await callback.message.answer("Выберите дату:", reply_markup=date_picker_keyboard(dates))
+        await callback.answer()
+        return
+
+    await callback.message.answer("Выберите время для записи:", reply_markup=time_picker_keyboard(slots))
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bk_time:"))
+async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
+    time_slot = callback.data.split(":", 1)[1].strip()
+    if not time_slot:
+        await callback.answer("Некорректное время.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    booking_date_iso = data.get("booking_date")
+    if not booking_date_iso:
+        await callback.answer("Сначала выберите дату.", show_alert=True)
+        return
+
+    await state.update_data(booking_time=time_slot)
+    await state.set_state(BookingStates.waiting_confirm)
+
+    booking_date = date.fromisoformat(str(booking_date_iso))
+    await callback.message.answer(
+        f"Подтвердите запись:\n{booking_date.strftime('%d.%m.%Y')} в {time_slot}",
+        reply_markup=confirm_booking_keyboard(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("bk_confirm:"))
+async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
+    action = callback.data.split(":", 1)[1]
+    data = await state.get_data()
+
+    booking_date_iso = data.get("booking_date")
+    booking_time = data.get("booking_time")
+    if not booking_date_iso:
+        await callback.answer("Сначала выберите дату.", show_alert=True)
+        return
+
+    booking_date = date.fromisoformat(str(booking_date_iso))
+
+    if action == "0":
+        # Назад к выбору времени.
+        await state.set_state(BookingStates.waiting_time)
+        slots = await booking_service.list_available_time_slots(booking_date)
+        if not slots:
+            await callback.message.answer("Свободных слотов больше нет. Выберите другую дату.")
+            await state.set_state(BookingStates.waiting_date)
+            dates = _next_working_dates(7)
+            await callback.message.answer("Выберите дату:", reply_markup=date_picker_keyboard(dates))
+        else:
+            await callback.message.answer("Выберите время для записи:", reply_markup=time_picker_keyboard(slots))
+        await callback.answer()
+        return
+
+    if action != "1":
+        await callback.answer()
+        return
+
+    if not booking_time:
+        await callback.answer("Сначала выберите время.", show_alert=True)
+        return
+
+    try:
+        appointment = await booking_service.create_appointment(
+            user_id=callback.from_user.id,
+            target_date=booking_date,
+            time_slot_hhmm=str(booking_time),
+        )
+    except BookingAlreadyExistsError as e:
+        await callback.message.answer(str(e))
+        await callback.answer()
+        return
+    except SlotUnavailableError:
+        # Слот мог стать занятым между отображением и подтверждением.
+        slots = await booking_service.list_available_time_slots(booking_date)
+        await callback.message.answer("Слот уже занят. Выберите другое время:", reply_markup=time_picker_keyboard(slots) if slots else None)
+        await callback.answer()
+        return
+
+    await state.clear()
+    await callback.message.answer(
+        f"Вы записаны на {appointment.date.strftime('%d.%m.%Y')} в {appointment.time_slot.strftime('%H:%M')}",
+        reply_markup=main_menu_keyboard(),
+    )
+    await callback.answer()
+
