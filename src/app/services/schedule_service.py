@@ -17,7 +17,8 @@ class ScheduleService:
     # В следующих шагах график будет приходить из БД (таблицы work_schedule/исключения).
     DEFAULT_START = "10:00"
     DEFAULT_END = "18:00"
-    DEFAULT_STEP_MINUTES = 30
+    # MVP: длительность визита фиксирована (шаг слота) 60 минут.
+    DEFAULT_STEP_MINUTES = 60
     WORKING_WEEKDAYS = {0, 1, 2, 3, 4, 5}  # Пн..Сб (0=Пн)
 
     def generate_slots(self, start: str, end: str, step_minutes: int) -> list[str]:

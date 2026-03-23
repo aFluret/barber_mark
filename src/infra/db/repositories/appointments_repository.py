@@ -10,18 +10,11 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 from datetime import date, datetime, time
 from typing import List, Optional, Set
 
 from src.infra.db.models import AppointmentModel
 from src.infra.db.supabase_client import get_supabase_client
-
-
-@dataclass(frozen=True)
-class SlotKey:
-    date: date
-    time_slot: str  # HH:MM
 
 
 class SlotUnavailableError(Exception):
@@ -78,42 +71,22 @@ class AppointmentsRepository:
 
     async def cancel_active_for_user(self, user_id: int) -> Optional[AppointmentModel]:
         # Изменение статуса делает слот "свободным" для логики выборки занятых.
-        def _op() -> Optional[dict]:
-            client = get_supabase_client()
-            res = (
-                client.table("appointments")
-                .update({"status": "cancelled"})
-                .eq("user_id", user_id)
-                .eq("status", "confirmed")
-                .select("id,user_id,date,time_slot,status,created_at")
-                .execute()
-            )
-            return res.data[0] if res.data else None
-
-        row = await asyncio.to_thread(_op)
-        if not row:
+        # В supabase-py 2.x chain `.update(...).select(...)` недоступен, поэтому:
+        # 1) заранее забираем активную запись через get_active_for_user()
+        # 2) обновляем статус без select
+        # 3) возвращаем исходные данные активной записи
+        existing = await self.get_active_for_user(user_id)
+        if existing is None:
             return None
 
-        created_at = row.get("created_at")
-        if isinstance(created_at, str):
-            created_at_dt = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        else:
-            created_at_dt = created_at
+        def _op() -> None:
+            client = get_supabase_client()
+            client.table("appointments").update({"status": "cancelled"}).eq(
+                "user_id", user_id
+            ).eq("status", "confirmed").execute()
 
-        slot = str(row["time_slot"])
-        if len(slot) >= 5:
-            slot_time = time.fromisoformat(slot[:5])
-        else:
-            slot_time = time.fromisoformat(slot)
-
-        return AppointmentModel(
-            id=int(row["id"]),
-            user_id=int(row["user_id"]),
-            date=date.fromisoformat(str(row["date"])),
-            time_slot=slot_time,
-            status=str(row["status"]),
-            created_at=created_at_dt,
-        )
+        await asyncio.to_thread(_op)
+        return existing
 
     async def list_confirmed_time_slots(self, target_date: date) -> Set[str]:
         def _op() -> Set[str]:
@@ -150,12 +123,40 @@ class AppointmentsRepository:
                 "time_slot": normalized_time,
                 "status": "confirmed",
             }
-            res = client.table("appointments").insert(payload).select(
-                "id,user_id,date,time_slot,status,created_at"
-            ).execute()
-            return res.data[0]
 
-        row = await asyncio.to_thread(_op)
+            # В supabase-py 2.x нельзя использовать `.select()` после `.insert()`.
+            # Поэтому: вставляем, затем отдельным запросом забираем запись того же слота.
+            client.table("appointments").insert(payload).execute()
+
+            res2 = (
+                client.table("appointments")
+                .select("id,user_id,date,time_slot,status,created_at")
+                .eq("user_id", user_id)
+                .eq("date", target_date.isoformat())
+                .eq("time_slot", normalized_time)
+                .eq("status", "confirmed")
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if not res2.data:
+                raise RuntimeError("Не удалось прочитать созданную запись appointments")
+            return res2.data[0]
+
+        try:
+            row = await asyncio.to_thread(_op)
+        except Exception as e:
+            # В Supabase/PG при конкурентной записи уникальность `appointments_confirmed_slot_unique`
+            # может вызвать exception (unique_violation / duplicate key).
+            msg = str(e).lower()
+            if (
+                "appointments_confirmed_slot_unique" in msg
+                or "duplicate key" in msg
+                or "unique constraint" in msg
+                or "23505" in msg  # postgres unique_violation
+            ):
+                raise SlotUnavailableError(f"Слот {time_slot_hhmm} уже занят") from e
+            raise
 
         created_at = row.get("created_at")
         if isinstance(created_at, str):

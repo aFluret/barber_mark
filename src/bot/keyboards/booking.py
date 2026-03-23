@@ -15,19 +15,35 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 
 def date_picker_keyboard(dates: list[date]) -> InlineKeyboardMarkup:
+    # Показываем по 3 кнопки в ряду, чтобы уменьшить количество скролла.
     buttons: list[list[InlineKeyboardButton]] = []
-    for d in dates:
+    for i in range(0, len(dates), 3):
+        row = dates[i : i + 3]
         buttons.append(
-            [InlineKeyboardButton(text=d.strftime("%d.%m"), callback_data=f"bk_date:{d.isoformat()}")]
+            [
+                InlineKeyboardButton(
+                    text=d.strftime("%d.%m"),
+                    callback_data=f"bk_date:{d.isoformat()}",
+                )
+                for d in row
+            ]
         )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def time_picker_keyboard(slots: list[str]) -> InlineKeyboardMarkup:
+    # Показываем по 3 кнопки в ряду.
     buttons: list[list[InlineKeyboardButton]] = []
-    for slot in slots:
+    for i in range(0, len(slots), 3):
+        row = slots[i : i + 3]
         buttons.append(
-            [InlineKeyboardButton(text=slot, callback_data=f"bk_time:{slot}")]
+            [
+                InlineKeyboardButton(
+                    text=slot,
+                    callback_data=f"bk_time:{slot}",
+                )
+                for slot in row
+            ]
         )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 

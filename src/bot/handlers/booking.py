@@ -167,6 +167,11 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer("Слот уже занят. Выберите другое время:", reply_markup=time_picker_keyboard(slots) if slots else None)
         await callback.answer()
         return
+    except Exception:
+        # Чтобы пользователь не видел "тишину" при внутренних сбоях.
+        await callback.message.answer("Произошла ошибка при создании записи. Попробуйте ещё раз.")
+        await callback.answer()
+        return
 
     await state.clear()
     await callback.message.answer(

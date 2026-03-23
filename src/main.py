@@ -8,8 +8,8 @@
 """
 
 from aiogram import Bot, Dispatcher
-from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.client.bot import DefaultBotProperties
 
 from src.bot.handlers.admin import router as admin_router
 from src.bot.handlers.appointment import router as appointment_router
@@ -29,7 +29,10 @@ def build_dispatcher() -> Dispatcher:
 
 async def main() -> None:
     settings = get_settings()
-    bot = Bot(token=settings.bot_token, parse_mode=ParseMode.HTML)
+    bot = Bot(
+        token=settings.bot_token,
+        default=DefaultBotProperties(parse_mode="HTML"),
+    )
     dispatcher = build_dispatcher()
     await dispatcher.start_polling(bot)
 
