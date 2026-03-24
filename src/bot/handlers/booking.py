@@ -78,7 +78,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
         return
 
     prompt = await message.answer(
-        "Выберите дату для записи:",
+        "Выбери дату для записи:",
         reply_markup=date_picker_keyboard(dates),
     )
     await state.update_data(booking_prompt_message_id=prompt.message_id)
@@ -100,7 +100,7 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
     if not slots:
         await _safe_edit_booking_message(
             callback,
-            "На выбранную дату свободных слотов нет. Выберите другую дату:",
+            "На выбранную дату свободных мест нет. Выбери другую дату:",
             reply_markup=date_picker_keyboard(_next_working_dates(7)),
         )
         await state.set_state(BookingStates.waiting_date)
@@ -109,7 +109,7 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
 
     await _safe_edit_booking_message(
         callback,
-        f"Дата: {target_date.strftime('%d.%m.%Y')}\nВыберите время для записи:",
+        f"Дата: {target_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
         reply_markup=time_picker_keyboard(slots),
     )
     await callback.answer()
@@ -125,7 +125,7 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     booking_date_iso = data.get("booking_date")
     if not booking_date_iso:
-        await callback.answer("Сначала выберите дату.", show_alert=True)
+        await callback.answer("Сначала выбери дату.", show_alert=True)
         return
 
     await state.update_data(booking_time=time_slot)
@@ -134,7 +134,7 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
     booking_date = date.fromisoformat(str(booking_date_iso))
     await _safe_edit_booking_message(
         callback,
-        f"Подтвердите запись:\n{booking_date.strftime('%d.%m.%Y')} в {time_slot}",
+        f"Подтверди запись:\n{booking_date.strftime('%d.%m.%Y')} в {time_slot}",
         reply_markup=confirm_booking_keyboard(),
     )
     await callback.answer()
@@ -148,7 +148,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
     booking_date_iso = data.get("booking_date")
     booking_time = data.get("booking_time")
     if not booking_date_iso:
-        await callback.answer("Сначала выберите дату.", show_alert=True)
+        await callback.answer("Сначала выбери дату.", show_alert=True)
         return
 
     booking_date = date.fromisoformat(str(booking_date_iso))
@@ -161,13 +161,13 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             await state.set_state(BookingStates.waiting_date)
             await _safe_edit_booking_message(
                 callback,
-                "Свободных слотов больше нет. Выберите другую дату:",
+                "Свободных мест больше нет. Выбери другую дату:",
                 reply_markup=date_picker_keyboard(_next_working_dates(7)),
             )
         else:
             await _safe_edit_booking_message(
                 callback,
-                f"Дата: {booking_date.strftime('%d.%m.%Y')}\nВыберите время для записи:",
+                f"Дата: {booking_date.strftime('%d.%m.%Y')}\nВыбери время для записи:",
                 reply_markup=time_picker_keyboard(slots),
             )
         await callback.answer()
@@ -178,7 +178,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     if not booking_time:
-        await callback.answer("Сначала выберите время.", show_alert=True)
+        await callback.answer("Сначала выбери время.", show_alert=True)
         return
 
     try:
@@ -197,13 +197,13 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         if slots:
             await _safe_edit_booking_message(
                 callback,
-                "Слот уже занят. Выберите другое время:",
+                "Место уже занято. Выбери другое время:",
                 reply_markup=time_picker_keyboard(slots),
             )
         else:
             await _safe_edit_booking_message(
                 callback,
-                "Слот уже занят, а свободных слотов на эту дату больше нет. Выберите другую дату:",
+                "Место уже занято, а свободных мест на эту дату больше нет. Выбери другую дату:",
                 reply_markup=date_picker_keyboard(_next_working_dates(7)),
             )
             await state.set_state(BookingStates.waiting_date)
@@ -213,18 +213,20 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         # Чтобы пользователь не видел "тишину" при внутренних сбоях.
         await _safe_edit_booking_message(
             callback,
-            "Произошла ошибка при создании записи. Попробуйте ещё раз.",
+            "Произошла ошибка при создании записи. Попробуй ещё раз.",
         )
         await callback.answer()
         return
 
     await state.clear()
+    user = await booking_service.get_user(callback.from_user.id)
+    user_name = user.name if user and user.name else "Клиент"
     try:
         await callback.message.delete()
     except Exception:
         pass
     await callback.message.answer(
-        f"Вы записаны на {appointment.date.strftime('%d.%m.%Y')} в {appointment.time_slot.strftime('%H:%M')}",
+        f"{user_name}, ты записан на {appointment.date.strftime('%d.%m.%Y')} в {appointment.time_slot.strftime('%H:%M')}",
         reply_markup=main_menu_keyboard(),
     )
     await callback.answer()

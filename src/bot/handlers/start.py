@@ -28,7 +28,7 @@ async def start_command(message: Message, state: FSMContext) -> None:
     existing = await booking_service.get_user(user_id)
     if existing is not None:
         await message.answer(
-            "Добро пожаловать в бот барбершопа.\nВыберите действие в меню ниже.",
+            f"Привет, {existing.name} 👋\nБарбер Илья на связи.\nВыбери действие в меню ниже.",
             reply_markup=main_menu_keyboard(),
         )
         await state.clear()
@@ -36,7 +36,7 @@ async def start_command(message: Message, state: FSMContext) -> None:
 
     contact_button = KeyboardButton(text="Поделиться контактом", request_contact=True)
     await message.answer(
-        "Чтобы записаться, поделитесь номером телефона кнопкой ниже.",
+        "Чтобы записать тебя на стрижку, поделись своим номером телефона.",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[[contact_button]],
             resize_keyboard=True,
@@ -55,19 +55,19 @@ async def handle_contact(message: Message, state: FSMContext) -> None:
     phone = message.contact.phone_number
     await state.update_data(phone=phone)
     await state.set_state(RegistrationStates.waiting_name)
-    await message.answer("Отлично. Введите ваше имя (как вам удобно в записи).")
+    await message.answer("Отлично, спасибо 👍. Как тебя зовут?\nНапиши имя, чтобы я знал как к тебе обращаться.")
 
 
 @router.message(RegistrationStates.waiting_contact)
 async def handle_contact_fallback(message: Message) -> None:
-    await message.answer("Нужен контакт. Нажмите кнопку «Поделиться контактом».")
+    await message.answer("Нужен контакт. Нажми кнопку «Поделиться контактом».")
 
 
 @router.message(RegistrationStates.waiting_name)
 async def handle_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if not name:
-        await message.answer("Имя не должно быть пустым. Введите имя еще раз.")
+        await message.answer("Имя не должно быть пустым. Введи имя еще раз.")
         return
 
     data = await state.get_data()
@@ -78,6 +78,6 @@ async def handle_name(message: Message, state: FSMContext) -> None:
     await state.clear()
 
     await message.answer(
-        "Спасибо! Теперь вы можете записаться.\nВыберите действие:",
+        f"Спасибо, {name}! Теперь ты можешь записаться.\nВыбери действие:",
         reply_markup=main_menu_keyboard(),
     )

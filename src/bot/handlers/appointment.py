@@ -23,13 +23,15 @@ booking_service = BookingService()
 @router.message(F.text == "📋 Моя запись")
 async def my_appointment(message: Message) -> None:
     user_id = message.from_user.id
+    user = await booking_service.get_user(user_id)
+    user_name = user.name if user and user.name else "Клиент"
     appt = await booking_service.get_active_appointment(user_id)
     if appt is None:
-        await message.answer("У вас пока нет активной записи.", reply_markup=main_menu_keyboard())
+        await message.answer(f"{user_name}, у тебя пока нет активной записи.", reply_markup=main_menu_keyboard())
         return
 
     await message.answer(
-        f"Ваша запись:\n{appt.date.strftime('%d.%m.%Y')} в {appt.time_slot.strftime('%H:%M')}",
+        f"{user_name}, твоя запись:\n{appt.date.strftime('%d.%m.%Y')} в {appt.time_slot.strftime('%H:%M')}",
         reply_markup=main_menu_keyboard(),
     )
 
@@ -37,14 +39,16 @@ async def my_appointment(message: Message) -> None:
 @router.message(F.text == "❌ Отменить запись")
 async def cancel_appointment(message: Message, state: FSMContext) -> None:
     user_id = message.from_user.id
+    user = await booking_service.get_user(user_id)
+    user_name = user.name if user and user.name else "Клиент"
     await state.clear()
 
     appt = await booking_service.cancel_active_appointment(user_id)
     if appt is None:
-        await message.answer("Активной записи не найдено.", reply_markup=main_menu_keyboard())
+        await message.answer(f"{user_name}, активной записи не найдено.", reply_markup=main_menu_keyboard())
         return
 
     await message.answer(
-        "Запись отменена. Слот снова доступен.",
+        f"{user_name}, запись отменена. Слот снова доступен.",
         reply_markup=main_menu_keyboard(),
     )
