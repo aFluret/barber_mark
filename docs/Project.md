@@ -167,6 +167,13 @@ barber_project/
 - `status` (text/check: confirmed|cancelled|completed)
 - `created_at` (timestamp, not null)
 
+### Таблица `work_schedule`
+- `id` (PK)
+- `weekdays` (int[]): python weekday для БД/бота (Пн=0 ... Вс=6) — формируется из `/set_schedule`
+- `start_time` (time, not null)
+- `end_time` (time, not null)
+- `created_at` (timestamp, not null)
+
 ### Рекомендуемые ограничения
 - `unique(date, time_slot)` для записей со статусом `confirmed` (через частичный индекс/проверку в сервисе).
 - Индекс для частых запросов: `(date, status)`.

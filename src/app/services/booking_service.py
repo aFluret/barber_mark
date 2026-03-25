@@ -56,7 +56,7 @@ class BookingService:
         return await self._appointments_repo.get_active_for_user(user_id)
 
     async def list_available_time_slots(self, target_date: date) -> list[str]:
-        candidate = self._schedule_service.get_candidate_slots_for_date(target_date)
+        candidate = await self._schedule_service.get_candidate_slots_for_date(target_date)
         occupied = await self._appointments_repo.list_confirmed_time_slots(target_date)
         return [slot for slot in candidate if slot not in occupied]
 

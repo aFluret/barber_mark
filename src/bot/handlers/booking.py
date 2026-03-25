@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -33,17 +33,6 @@ from src.bot.keyboards.main_menu import main_menu_keyboard
 router = Router()
 booking_service = BookingService()
 schedule_service = ScheduleService()
-
-
-def _next_working_dates(count: int) -> list[date]:
-    today = date.today()
-    out: list[date] = []
-    d = today
-    while len(out) < count:
-        if schedule_service.is_working_day(d):
-            out.append(d)
-        d += timedelta(days=1)
-    return out
 
 
 async def _safe_edit_booking_message(
@@ -72,7 +61,7 @@ async def start_booking(message: Message, state: FSMContext) -> None:
 
     await state.set_state(BookingStates.waiting_date)
 
-    dates = _next_working_dates(7)
+    dates = await schedule_service.next_working_dates(7)
     if not dates:
         await message.answer("На ближайшее время рабочие дни недоступны.")
         return
@@ -101,7 +90,7 @@ async def choose_date(callback: CallbackQuery, state: FSMContext) -> None:
         await _safe_edit_booking_message(
             callback,
             "На выбранную дату свободных мест нет. Выбери другую дату:",
-            reply_markup=date_picker_keyboard(_next_working_dates(7)),
+            reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7)),
         )
         await state.set_state(BookingStates.waiting_date)
         await callback.answer()
@@ -162,7 +151,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             await _safe_edit_booking_message(
                 callback,
                 "Свободных мест больше нет. Выбери другую дату:",
-                reply_markup=date_picker_keyboard(_next_working_dates(7)),
+                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7)),
             )
         else:
             await _safe_edit_booking_message(
@@ -204,7 +193,7 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
             await _safe_edit_booking_message(
                 callback,
                 "Место уже занято, а свободных мест на эту дату больше нет. Выбери другую дату:",
-                reply_markup=date_picker_keyboard(_next_working_dates(7)),
+                reply_markup=date_picker_keyboard(await schedule_service.next_working_dates(7)),
             )
             await state.set_state(BookingStates.waiting_date)
         await callback.answer()
