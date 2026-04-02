@@ -57,7 +57,7 @@ class ReminderService:
         # Время записи интерпретируется как локальное время барбера.
         return datetime.combine(
             appointment.date,
-            appointment.time_slot,
+            appointment.start_time,
             tzinfo=self._app_timezone,
         )
 
@@ -103,7 +103,7 @@ class ReminderService:
 
             text = (
                 f"Напоминание: вы записаны на {appointment.date.strftime('%d.%m.%Y')} "
-                f"в {appointment.time_slot.strftime('%H:%M')}."
+                f"в {appointment.start_time.strftime('%H:%M')}."
             )
 
             try:

@@ -25,7 +25,9 @@ def test_remind_times_from_appointment_dt_local(monkeypatch) -> None:
         id=1,
         user_id=10,
         date=date(2026, 3, 28),
-        time_slot=time(1, 0),
+        service_id=1,
+        start_time=time(1, 0),
+        end_time=time(2, 0),
         status="confirmed",
         created_at=datetime.now(timezone.utc),
     )
@@ -69,7 +71,9 @@ def test_timezone_can_be_numeric_offset(monkeypatch) -> None:
         id=2,
         user_id=22,
         date=date(2026, 3, 28),
-        time_slot=time(16, 0),
+        service_id=1,
+        start_time=time(16, 0),
+        end_time=time(17, 0),
         status="confirmed",
         created_at=datetime.now(timezone.utc),
     )

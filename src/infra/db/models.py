@@ -20,12 +20,30 @@ class UserModel:
     role: str
     created_at: Optional[datetime]
 
+@dataclass(slots=True)
+class ServiceModel:
+    """
+    Справочник услуг барбершопа.
+
+    Используется для:
+    - выбора услуги клиентом/админом;
+    - расчета end_time по duration_minutes;
+    - отображения цены в админке.
+    """
+
+    id: int
+    name: str
+    price_byn: int
+    duration_minutes: int
+
 
 @dataclass(slots=True)
 class AppointmentModel:
     id: int
     user_id: int
     date: date
-    time_slot: time
+    service_id: int
+    start_time: time
+    end_time: time
     status: str
     created_at: datetime

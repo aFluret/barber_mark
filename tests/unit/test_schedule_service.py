@@ -7,10 +7,77 @@
  */
 """
 
+import asyncio
+from datetime import date, time, timedelta
+
+from src.app.services.booking_service import BookingService
 from src.app.services.schedule_service import ScheduleService
+from src.infra.db.models import ServiceModel
+from src.infra.db.repositories.work_schedule_repository import WorkScheduleModel
 
 
-def test_generate_slots_half_hour_step() -> None:
+class _DummyWorkScheduleRepo:
+    async def get_latest(self):
+        return WorkScheduleModel(
+            weekdays={0, 1, 2, 3, 4, 5},
+            start_time=time(10, 0),
+            end_time=time(20, 0),
+        )
+
+
+class _DummyServicesRepo:
+    async def get_by_id(self, service_id: int):
+        if service_id != 1:
+            return None
+        return ServiceModel(id=1, name="Test", price_byn=45, duration_minutes=60)
+
+
+class _DummyAppointmentsRepo:
+    async def list_confirmed_intervals(self, target_date: date):
+        # Один подтвержденный интервал: [10:00, 11:00)
+        return [(time(10, 0), time(11, 0))]
+
+
+def test_schedule_service_step_and_last_start_duration_60() -> None:
     service = ScheduleService()
-    slots = service.generate_slots("10:00", "11:30", 30)
-    assert slots == ["10:00", "10:30", "11:00"]
+    service._repo = _DummyWorkScheduleRepo()
+
+    # 2026-03-30 — понедельник
+    target_date = date(2026, 3, 30)
+
+    slots = asyncio.run(service.get_candidate_slots_for_date(target_date, duration_minutes=60))
+
+    # step=30 => старт 10:00...19:00, последний старт для 60 минут = 19:00
+    assert slots[0] == "10:00"
+    assert "19:00" in slots
+    assert "19:30" not in slots
+
+
+def test_schedule_service_lunch_blocking() -> None:
+    service = ScheduleService()
+    service._repo = _DummyWorkScheduleRepo()
+
+    target_date = date(2026, 3, 30)
+    slots = asyncio.run(service.get_candidate_slots_for_date(target_date, duration_minutes=60))
+
+    # Обед 14:00–15:00 блокирует интервалы, которые пересекаются с ним
+    assert "14:00" not in slots
+    assert "13:30" not in slots
+    assert "15:00" in slots
+
+
+def test_booking_service_overlap_filter_half_open_interval() -> None:
+    bs = BookingService()
+    bs._schedule_service._repo = _DummyWorkScheduleRepo()
+    bs._services_repo = _DummyServicesRepo()
+    bs._appointments_repo = _DummyAppointmentsRepo()
+
+    target_date = date(2026, 3, 30)
+    slots = asyncio.run(bs.list_available_time_slots(target_date, service_id=1))
+
+    # Существующая запись [10:00, 11:00):
+    assert "10:00" not in slots
+    assert "10:30" not in slots
+
+    # Граница end_time == start_time считается допустимой:
+    assert "11:00" in slots

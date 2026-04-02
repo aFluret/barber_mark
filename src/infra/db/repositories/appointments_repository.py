@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, time
-from typing import List, Optional, Set
+from typing import List, Optional, Tuple
 
 from src.infra.db.models import AppointmentModel
 from src.infra.db.supabase_client import get_supabase_client
@@ -23,19 +23,34 @@ class SlotUnavailableError(Exception):
 
 class AppointmentsRepository:
     @staticmethod
-    def _normalize_time_slot(time_slot_hhmm: str) -> str:
-        # PostgreSQL `time` часто принимает формат HH:MM:SS.
-        hhmm = time_slot_hhmm.strip()
-        if len(hhmm) == 5 and ":" in hhmm:
-            return f"{hhmm}:00"
-        return hhmm
+    def _parse_supabase_time(raw: object) -> time:
+        """
+        Supabase time обычно возвращает строку вроде 'HH:MM:SS' или 'HH:MM'.
+        """
+        if raw is None:
+            raise ValueError("Supabase time is null")
+        s = str(raw).strip()
+        # Нам нужны первые HH:MM (timezone/секунды не важны для логики слотов).
+        if len(s) >= 5:
+            s = s[:5]
+        return time.fromisoformat(s)
+
+    @staticmethod
+    def _time_to_supabase(raw: time) -> str:
+        # Supabase ожидает format 'HH:MM:SS' для полей типа time.
+        return raw.strftime("%H:%M:%S")
+
+    @staticmethod
+    def _intervals_overlap(a_start: time, a_end: time, b_start: time, b_end: time) -> bool:
+        # Half-open intervals: [start, end). Границы не считаем пересечением.
+        return a_start < b_end and a_end > b_start
 
     async def get_active_for_user(self, user_id: int) -> Optional[AppointmentModel]:
         def _op() -> Optional[dict]:
             client = get_supabase_client()
             res = (
                 client.table("appointments")
-                .select("id,user_id,date,time_slot,status,created_at")
+                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
                 .eq("user_id", user_id)
                 .eq("status", "confirmed")
                 .limit(1)
@@ -53,18 +68,16 @@ class AppointmentsRepository:
         else:
             created_at_dt = created_at
 
-        # Supabase обычно возвращает time как строку.
-        slot = str(row["time_slot"])
-        if len(slot) >= 5:
-            slot_time = time.fromisoformat(slot[:5])
-        else:
-            slot_time = time.fromisoformat(slot)
+        start_t = self._parse_supabase_time(row["start_time"])
+        end_t = self._parse_supabase_time(row["end_time"])
 
         return AppointmentModel(
             id=int(row["id"]),
             user_id=int(row["user_id"]),
             date=date.fromisoformat(str(row["date"])),
-            time_slot=slot_time,
+            service_id=int(row["service_id"]),
+            start_time=start_t,
+            end_time=end_t,
             status=str(row["status"]),
             created_at=created_at_dt,
         )
@@ -88,39 +101,68 @@ class AppointmentsRepository:
         await asyncio.to_thread(_op)
         return existing
 
-    async def list_confirmed_time_slots(self, target_date: date) -> Set[str]:
-        def _op() -> Set[str]:
+    async def cancel_confirmed_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
+        """
+        Админская отмена конкретной записи по appointment_id.
+        """
+        existing = await self.get_by_id(appointment_id)
+        if existing is None or existing.status != "confirmed":
+            return None
+
+        def _op() -> None:
+            client = get_supabase_client()
+            client.table("appointments").update({"status": "cancelled"}).eq("id", appointment_id).eq(
+                "status", "confirmed"
+            ).execute()
+
+        await asyncio.to_thread(_op)
+        return existing
+
+    async def list_confirmed_intervals(self, target_date: date) -> List[Tuple[time, time]]:
+        def _op() -> List[Tuple[time, time]]:
             client = get_supabase_client()
             res = (
                 client.table("appointments")
-                .select("time_slot")
+                .select("start_time,end_time")
                 .eq("date", target_date.isoformat())
                 .eq("status", "confirmed")
                 .execute()
             )
-            slots: Set[str] = set()
+            out: List[Tuple[time, time]] = []
             for row in res.data or []:
-                slot = str(row["time_slot"])
-                slots.add(slot[:5])
-            return slots
+                out.append(
+                    (
+                        self._parse_supabase_time(row["start_time"]),
+                        self._parse_supabase_time(row["end_time"]),
+                    )
+                )
+            return out
 
         return await asyncio.to_thread(_op)
 
-    async def create_confirmed(self, user_id: int, target_date: date, time_slot_hhmm: str) -> AppointmentModel:
-        normalized_time = self._normalize_time_slot(time_slot_hhmm)
-
-        # Важно: для защиты от гонок в проде нужен уникальный индекс/constraint в БД.
-        # Здесь логика сделана "проверил-далее-вставил" для MVP.
-        occupied = await self.list_confirmed_time_slots(target_date)
-        if time_slot_hhmm[:5] in occupied:
-            raise SlotUnavailableError(f"Слот {time_slot_hhmm} уже занят")
+    async def create_confirmed(
+        self,
+        user_id: int,
+        target_date: date,
+        service_id: int,
+        start_time: time,
+        end_time: time,
+    ) -> AppointmentModel:
+        # Приложение делает fast-check по confirmed interval'ам,
+        # а БД обеспечивает основную защиту от гонок.
+        occupied = await self.list_confirmed_intervals(target_date)
+        for o_start, o_end in occupied:
+            if self._intervals_overlap(start_time, end_time, o_start, o_end):
+                raise SlotUnavailableError("Интервал пересекается с существующей записью")
 
         def _op() -> dict:
             client = get_supabase_client()
             payload = {
                 "user_id": user_id,
                 "date": target_date.isoformat(),
-                "time_slot": normalized_time,
+                "service_id": service_id,
+                "start_time": self._time_to_supabase(start_time),
+                "end_time": self._time_to_supabase(end_time),
                 "status": "confirmed",
             }
 
@@ -130,10 +172,12 @@ class AppointmentsRepository:
 
             res2 = (
                 client.table("appointments")
-                .select("id,user_id,date,time_slot,status,created_at")
+                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
                 .eq("user_id", user_id)
                 .eq("date", target_date.isoformat())
-                .eq("time_slot", normalized_time)
+                .eq("service_id", service_id)
+                .eq("start_time", self._time_to_supabase(start_time))
+                .eq("end_time", self._time_to_supabase(end_time))
                 .eq("status", "confirmed")
                 .order("created_at", desc=True)
                 .limit(1)
@@ -146,16 +190,15 @@ class AppointmentsRepository:
         try:
             row = await asyncio.to_thread(_op)
         except Exception as e:
-            # В Supabase/PG при конкурентной записи уникальность `appointments_confirmed_slot_unique`
-            # может вызвать exception (unique_violation / duplicate key).
+            # В Supabase/PG exclusion constraint при конкурентной записи может вызвать exception.
             msg = str(e).lower()
             if (
-                "appointments_confirmed_slot_unique" in msg
+                "exclusion" in msg
                 or "duplicate key" in msg
                 or "unique constraint" in msg
-                or "23505" in msg  # postgres unique_violation
+                or "23505" in msg
             ):
-                raise SlotUnavailableError(f"Слот {time_slot_hhmm} уже занят") from e
+                raise SlotUnavailableError("Интервал пересекается с существующей записью") from e
             raise
 
         created_at = row.get("created_at")
@@ -164,17 +207,16 @@ class AppointmentsRepository:
         else:
             created_at_dt = created_at
 
-        slot = str(row["time_slot"])
-        if len(slot) >= 5:
-            slot_time = time.fromisoformat(slot[:5])
-        else:
-            slot_time = time.fromisoformat(slot)
+        start_t = self._parse_supabase_time(row["start_time"])
+        end_t = self._parse_supabase_time(row["end_time"])
 
         return AppointmentModel(
             id=int(row["id"]),
             user_id=int(row["user_id"]),
             date=date.fromisoformat(str(row["date"])),
-            time_slot=slot_time,
+            service_id=int(row["service_id"]),
+            start_time=start_t,
+            end_time=end_t,
             status=str(row["status"]),
             created_at=created_at_dt,
         )
@@ -185,10 +227,10 @@ class AppointmentsRepository:
             client = get_supabase_client()
             res = (
                 client.table("appointments")
-                .select("id,user_id,date,time_slot,status,created_at")
+                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
                 .eq("date", target_date.isoformat())
                 .eq("status", "confirmed")
-                .order("time_slot")
+                .order("start_time")
                 .execute()
             )
             return list(res.data or [])
@@ -202,15 +244,17 @@ class AppointmentsRepository:
             else:
                 created_at_dt = created_at
 
-            slot = str(row["time_slot"])
-            slot_time = time.fromisoformat(slot[:5]) if len(slot) >= 5 else time.fromisoformat(slot)
+            start_t = self._parse_supabase_time(row["start_time"])
+            end_t = self._parse_supabase_time(row["end_time"])
 
             out.append(
                 AppointmentModel(
                     id=int(row["id"]),
                     user_id=int(row["user_id"]),
                     date=date.fromisoformat(str(row["date"])),
-                    time_slot=slot_time,
+                    service_id=int(row["service_id"]),
+                    start_time=start_t,
+                    end_time=end_t,
                     status=str(row["status"]),
                     created_at=created_at_dt,
                 )
@@ -223,11 +267,11 @@ class AppointmentsRepository:
             client = get_supabase_client()
             res = (
                 client.table("appointments")
-                .select("id,user_id,date,time_slot,status,created_at")
+                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
                 .gte("date", target_date.isoformat())
                 .eq("status", "confirmed")
                 .order("date")
-                .order("time_slot")
+                .order("start_time")
                 .execute()
             )
             return list(res.data or [])
@@ -241,15 +285,17 @@ class AppointmentsRepository:
             else:
                 created_at_dt = created_at
 
-            slot = str(row["time_slot"])
-            slot_time = time.fromisoformat(slot[:5]) if len(slot) >= 5 else time.fromisoformat(slot)
+            start_t = self._parse_supabase_time(row["start_time"])
+            end_t = self._parse_supabase_time(row["end_time"])
 
             out.append(
                 AppointmentModel(
                     id=int(row["id"]),
                     user_id=int(row["user_id"]),
                     date=date.fromisoformat(str(row["date"])),
-                    time_slot=slot_time,
+                    service_id=int(row["service_id"]),
+                    start_time=start_t,
+                    end_time=end_t,
                     status=str(row["status"]),
                     created_at=created_at_dt,
                 )
@@ -261,7 +307,7 @@ class AppointmentsRepository:
             client = get_supabase_client()
             res = (
                 client.table("appointments")
-                .select("id,user_id,date,time_slot,status,created_at")
+                .select("id,user_id,date,service_id,start_time,end_time,status,created_at")
                 .eq("id", appointment_id)
                 .limit(1)
                 .execute()
@@ -278,14 +324,16 @@ class AppointmentsRepository:
         else:
             created_at_dt = created_at
 
-        slot = str(row["time_slot"])
-        slot_time = time.fromisoformat(slot[:5]) if len(slot) >= 5 else time.fromisoformat(slot)
+        start_t = self._parse_supabase_time(row["start_time"])
+        end_t = self._parse_supabase_time(row["end_time"])
 
         return AppointmentModel(
             id=int(row["id"]),
             user_id=int(row["user_id"]),
             date=date.fromisoformat(str(row["date"])),
-            time_slot=slot_time,
+            service_id=int(row["service_id"]),
+            start_time=start_t,
+            end_time=end_t,
             status=str(row["status"]),
             created_at=created_at_dt,
         )

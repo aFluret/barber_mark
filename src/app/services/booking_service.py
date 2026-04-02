@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, time, timedelta
 from typing import Optional
 
 from src.app.services.schedule_service import ScheduleService
@@ -20,6 +20,7 @@ from src.infra.db.repositories.appointments_repository import (
     AppointmentsRepository,
     SlotUnavailableError,
 )
+from src.infra.db.repositories.services_repository import ServicesRepository
 from src.infra.db.repositories.users_repository import UsersRepository
 
 
@@ -37,6 +38,7 @@ class BookingService:
         self._schedule_service = ScheduleService()
         self._users_repo = UsersRepository()
         self._appointments_repo = AppointmentsRepository()
+        self._services_repo = ServicesRepository()
         self._reminder_service = ReminderService()
 
     async def get_user(self, user_id: int) -> Optional[UserModel]:
@@ -56,12 +58,40 @@ class BookingService:
     async def get_active_appointment(self, user_id: int) -> Optional[AppointmentModel]:
         return await self._appointments_repo.get_active_for_user(user_id)
 
-    async def list_available_time_slots(self, target_date: date) -> list[str]:
-        candidate = await self._schedule_service.get_candidate_slots_for_date(target_date)
-        occupied = await self._appointments_repo.list_confirmed_time_slots(target_date)
-        return [slot for slot in candidate if slot not in occupied]
+    @staticmethod
+    def _intervals_overlap(a_start: time, a_end: time, b_start: time, b_end: time) -> bool:
+        # Half-open intervals: [start, end)
+        return a_start < b_end and a_end > b_start
 
-    async def create_appointment(self, user_id: int, target_date: date, time_slot_hhmm: str) -> AppointmentModel:
+    async def list_available_time_slots(self, target_date: date, service_id: int) -> list[str]:
+        service = await self._services_repo.get_by_id(service_id)
+        if service is None:
+            return []
+
+        candidates = await self._schedule_service.get_candidate_slots_for_date(
+            target_date,
+            duration_minutes=service.duration_minutes,
+        )
+        occupied = await self._appointments_repo.list_confirmed_intervals(target_date)
+
+        out: list[str] = []
+        for slot_hhmm in candidates:
+            start_t = datetime.strptime(slot_hhmm, "%H:%M").time()
+            end_t = (datetime.combine(target_date, start_t) + timedelta(minutes=service.duration_minutes)).time()
+
+            if any(self._intervals_overlap(start_t, end_t, o_start, o_end) for o_start, o_end in occupied):
+                continue
+            out.append(slot_hhmm)
+
+        return out
+
+    async def create_appointment(
+        self,
+        user_id: int,
+        target_date: date,
+        service_id: int,
+        time_slot_hhmm: str,
+    ) -> AppointmentModel:
         existing = await self.get_active_appointment(user_id)
         if existing is not None:
             raise BookingAlreadyExistsError(
@@ -69,10 +99,19 @@ class BookingService:
             )
 
         try:
+            service = await self._services_repo.get_by_id(service_id)
+            if service is None:
+                raise RuntimeError("Указанная услуга не найдена")
+
+            start_t = datetime.strptime(time_slot_hhmm, "%H:%M").time()
+            end_t = (datetime.combine(target_date, start_t) + timedelta(minutes=service.duration_minutes)).time()
+
             appointment = await self._appointments_repo.create_confirmed(
                 user_id=user_id,
                 target_date=target_date,
-                time_slot_hhmm=time_slot_hhmm,
+                service_id=service_id,
+                start_time=start_t,
+                end_time=end_t,
             )
             await self._reminder_service.schedule_reminders(appointment)
             return appointment
@@ -82,6 +121,12 @@ class BookingService:
 
     async def cancel_active_appointment(self, user_id: int) -> Optional[AppointmentModel]:
         cancelled = await self._appointments_repo.cancel_active_for_user(user_id)
+        if cancelled is not None:
+            await self._reminder_service.cancel_future_reminders_for_appointment(cancelled.id)
+        return cancelled
+
+    async def cancel_appointment_by_id(self, appointment_id: int) -> Optional[AppointmentModel]:
+        cancelled = await self._appointments_repo.cancel_confirmed_by_id(appointment_id)
         if cancelled is not None:
             await self._reminder_service.cancel_future_reminders_for_appointment(cancelled.id)
         return cancelled

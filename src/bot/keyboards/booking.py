@@ -13,6 +13,8 @@ from datetime import date
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.infra.db.models import ServiceModel
+
 
 def date_picker_keyboard(dates: list[date]) -> InlineKeyboardMarkup:
     # Показываем по 3 кнопки в ряду, чтобы уменьшить количество скролла.
@@ -28,6 +30,28 @@ def date_picker_keyboard(dates: list[date]) -> InlineKeyboardMarkup:
                 for d in row
             ]
         )
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def services_picker_keyboard(services: list[ServiceModel]) -> InlineKeyboardMarkup:
+    """
+    Инлайн-выбор услуги с отображением цены и длительности.
+    callback_data формата: `bk_service:{service_id}`
+    """
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(services), 2):
+        row = services[i : i + 2]
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=f"{s.name} — {s.price_byn} BYN ({s.duration_minutes} мин)",
+                    callback_data=f"bk_service:{s.id}",
+                )
+                for s in row
+            ]
+        )
+
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 

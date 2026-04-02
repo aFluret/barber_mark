@@ -15,27 +15,21 @@ from src.infra.db.repositories.work_schedule_repository import WorkScheduleModel
 
 class ScheduleService:
     DEFAULT_START = "10:00"
-    DEFAULT_END = "18:00"
-    # MVP: длительность визита фиксирована (шаг слота) 60 минут.
-    DEFAULT_STEP_MINUTES = 60
+    DEFAULT_END = "20:00"
+    # Шаг стартового времени — 30 минут (как в TZ_MARK).
+    DEFAULT_STEP_MINUTES = 30
     WORKING_WEEKDAYS = {0, 1, 2, 3, 4, 5}  # Пн..Сб (0=Пн)
+
+    LUNCH_START = time(14, 0)
+    LUNCH_END = time(15, 0)
 
     def __init__(self) -> None:
         self._repo = WorkScheduleRepository()
 
-    def generate_slots(self, start: str, end: str, step_minutes: int) -> list[str]:
-        start_dt = datetime.strptime(start, "%H:%M")
-        end_dt = datetime.strptime(end, "%H:%M")
-        slots: list[str] = []
-        current = start_dt
-        while current < end_dt:
-            slots.append(current.strftime("%H:%M"))
-            current += timedelta(minutes=step_minutes)
-        return slots
-
     @staticmethod
-    def _time_to_hhmm(t: time) -> str:
-        return t.strftime("%H:%M")
+    def _intervals_overlap(a_start: time, a_end: time, b_start: time, b_end: time) -> bool:
+        # Half-open intervals: [start, end). Границы не считаем пересечением.
+        return a_start < b_end and a_end > b_start
 
     async def _get_schedule_or_default(self) -> WorkScheduleModel:
         schedule = await self._repo.get_latest()
@@ -53,18 +47,44 @@ class ScheduleService:
         out: list[date] = []
         d = today
         while len(out) < count:
+            # TZ_MARK: в календаре выбора даты воскресенье не показываем.
+            if d.weekday() == 6:
+                d += timedelta(days=1)
+                continue
+
             if d.weekday() in schedule.weekdays:
                 out.append(d)
             d += timedelta(days=1)
         return out
 
-    async def get_candidate_slots_for_date(self, target_date: date) -> list[str]:
+    async def get_candidate_slots_for_date(self, target_date: date, duration_minutes: int) -> list[str]:
         schedule = await self._get_schedule_or_default()
+        if target_date.weekday() == 6:
+            return []
         if target_date.weekday() not in schedule.weekdays:
             return []
 
-        return self.generate_slots(
-            self._time_to_hhmm(schedule.start_time),
-            self._time_to_hhmm(schedule.end_time),
-            self.DEFAULT_STEP_MINUTES,
-        )
+        work_start_dt = datetime.combine(target_date, schedule.start_time)
+        work_end_dt = datetime.combine(target_date, schedule.end_time)
+        step = timedelta(minutes=self.DEFAULT_STEP_MINUTES)
+
+        # Последний старт, при котором запись успевает закончиться до конца рабочего дня.
+        last_start_dt = work_end_dt - timedelta(minutes=duration_minutes)
+        if last_start_dt < work_start_dt:
+            return []
+
+        out: list[str] = []
+        current = work_start_dt
+        while current <= last_start_dt:
+            start_t = current.time()
+            end_t = (current + timedelta(minutes=duration_minutes)).time()
+
+            # TZ_MARK: слот не должен пересекаться с обедом 14:00–15:00.
+            if self._intervals_overlap(start_t, end_t, self.LUNCH_START, self.LUNCH_END):
+                current += step
+                continue
+
+            out.append(start_t.strftime("%H:%M"))
+            current += step
+
+        return out

@@ -16,6 +16,7 @@ class RegistrationStates(StatesGroup):
 
 
 class BookingStates(StatesGroup):
+    waiting_service = State()
     waiting_date = State()
     waiting_time = State()
     waiting_confirm = State()
@@ -24,4 +25,11 @@ class BookingStates(StatesGroup):
 class AdminPanelStates(StatesGroup):
     waiting_access_code = State()
     in_menu = State()
+
+
+class AdminScheduleStates(StatesGroup):
+    waiting_weekdays = State()
+    waiting_start_time = State()
+    waiting_end_time = State()
+    waiting_confirm = State()
 
