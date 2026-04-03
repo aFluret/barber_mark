@@ -36,7 +36,7 @@ async def start_command(message: Message, state: FSMContext) -> None:
 
     contact_button = KeyboardButton(text="Поделиться контактом", request_contact=True)
     await message.answer(
-        "Чтобы записать тебя на стрижку, поделись своим номером телефона.",
+        "Отправь номер телефона 📱",
         reply_markup=ReplyKeyboardMarkup(
             keyboard=[[contact_button]],
             resize_keyboard=True,
@@ -67,7 +67,7 @@ async def handle_contact_fallback(message: Message) -> None:
 async def handle_name(message: Message, state: FSMContext) -> None:
     name = (message.text or "").strip()
     if not name:
-        await message.answer("Имя не должно быть пустым. Введи имя еще раз.")
+        await message.answer("Как тебя зовут? 👤")
         return
 
     data = await state.get_data()

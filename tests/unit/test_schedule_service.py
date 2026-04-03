@@ -37,6 +37,15 @@ class _DummyAppointmentsRepo:
         # Один подтвержденный интервал: [10:00, 11:00)
         return [(time(10, 0), time(11, 0))]
 
+class _DummyCustomLunchScheduleRepo:
+    async def get_latest(self):
+        return WorkScheduleModel(
+            weekdays={0, 1, 2, 3, 4, 5},
+            start_time=time(8, 0),
+            end_time=time(20, 0),
+            lunch_time=time(18, 30),
+        )
+
 
 def test_schedule_service_step_and_last_start_duration_60() -> None:
     service = ScheduleService()
@@ -99,3 +108,16 @@ def test_schedule_service_step_changes_with_duration_90() -> None:
     assert "14:30" not in slots
     assert "16:00" in slots
     assert "17:30" in slots
+
+
+def test_schedule_service_uses_lunch_time_from_schedule() -> None:
+    service = ScheduleService()
+    service._repo = _DummyCustomLunchScheduleRepo()
+
+    target_date = date(2026, 3, 30)
+    slots = asyncio.run(service.get_candidate_slots_for_date(target_date, duration_minutes=30))
+
+    # lunch_time=18:30 => блок 18:30–19:30
+    assert "18:30" not in slots
+    assert "19:00" not in slots
+    assert "19:30" in slots

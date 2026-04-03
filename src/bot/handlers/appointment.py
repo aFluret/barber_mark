@@ -9,15 +9,51 @@
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from src.app.services.booking_service import BookingService
 from src.bot.keyboards.main_menu import menu_keyboard_for_role
 
 router = Router()
 booking_service = BookingService()
+RU_WEEKDAY_FULL = {
+    0: "понедельник",
+    1: "вторник",
+    2: "среда",
+    3: "четверг",
+    4: "пятница",
+    5: "суббота",
+    6: "воскресенье",
+}
+RU_MONTHS_GEN = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
+
+
+def _human_booking_date(d: date) -> str:
+    today = date.today()
+    if d == today:
+        suffix = "сегодня"
+    elif d == today + timedelta(days=1):
+        suffix = "завтра"
+    else:
+        suffix = RU_WEEKDAY_FULL[d.weekday()]
+    return f"{d.day} {RU_MONTHS_GEN[d.month]} ({suffix})"
 
 
 @router.message(F.text == "📋 Моя запись")
@@ -32,8 +68,8 @@ async def my_appointment(message: Message) -> None:
         return
 
     await message.answer(
-        f"{user_name}, твоя запись:\n"
-        f"{appt.date.strftime('%d.%m.%Y')} в {appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
+        f"{user_name}, ты записан на {_human_booking_date(appt.date)} ✅\n"
+        f"Время: {appt.start_time.strftime('%H:%M')}–{appt.end_time.strftime('%H:%M')}",
         reply_markup=menu_keyboard_for_role(user_role),
     )
 
@@ -52,6 +88,8 @@ async def cancel_appointment(message: Message, state: FSMContext) -> None:
         return
 
     await message.answer(
-        f"{user_name}, запись отменена. Слот снова доступен.",
-        reply_markup=menu_keyboard_for_role(user_role),
+        "Запись отменена ✅\n\nМожешь записаться заново на любую услугу.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="Выбрать услугу", callback_data="bk_restart_service")]]
+        ),
     )

@@ -10,7 +10,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -66,6 +66,29 @@ CATEGORY_LABELS: dict[str, str] = {
 }
 
 OREDR_CATEGORY_KEYS: list[str] = ["cuts", "beard", "combo"]
+RU_WEEKDAY_FULL = {
+    0: "понедельник",
+    1: "вторник",
+    2: "среда",
+    3: "четверг",
+    4: "пятница",
+    5: "суббота",
+    6: "воскресенье",
+}
+RU_MONTHS_GEN = {
+    1: "января",
+    2: "февраля",
+    3: "марта",
+    4: "апреля",
+    5: "мая",
+    6: "июня",
+    7: "июля",
+    8: "августа",
+    9: "сентября",
+    10: "октября",
+    11: "ноября",
+    12: "декабря",
+}
 
 
 def _category_services(services: list, category_key: str) -> list:
@@ -79,6 +102,17 @@ def _build_categories_present(services: list) -> list[tuple[str, str]]:
         if _category_services(services, key):
             out.append((key, CATEGORY_LABELS[key]))
     return out
+
+
+def _human_booking_date(d: date) -> str:
+    today = date.today()
+    if d == today:
+        suffix = "сегодня"
+    elif d == today + timedelta(days=1):
+        suffix = "завтра"
+    else:
+        suffix = RU_WEEKDAY_FULL[d.weekday()]
+    return f"{d.day} {RU_MONTHS_GEN[d.month]} ({suffix})"
 
 
 async def _safe_edit_booking_message(
@@ -150,7 +184,7 @@ async def choose_category(callback: CallbackQuery, state: FSMContext) -> None:
 
     await _safe_edit_booking_message(
         callback,
-        "Выбери услугу:",
+        "Выбери услугу ✂️",
         reply_markup=services_picker_keyboard(cat_services, back_callback_data="bk_back:category"),
     )
     await callback.answer()
@@ -167,6 +201,39 @@ async def back_to_menu(callback: CallbackQuery, state: FSMContext) -> None:
         chat_id=callback.message.chat.id,
         text="Выберите действие в меню ниже.",
         reply_markup=menu_keyboard_for_role("client"),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bk_restart_service")
+async def restart_booking_from_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    user_id = callback.from_user.id
+    existing = await booking_service.get_user(user_id)
+    if existing is None:
+        await callback.message.answer("Сначала пройдите регистрацию: нажмите /start.")
+        await callback.answer()
+        return
+
+    services = await services_repo.list_all()
+    if not services:
+        await callback.message.answer(
+            "Сейчас запись недоступна: администратор еще не добавил услуги.\n"
+            "Напишите администратору и попробуйте позже."
+        )
+        await callback.answer()
+        return
+
+    categories = _build_categories_present(services)
+    if not categories:
+        await callback.message.answer("Список услуг недоступен.")
+        await callback.answer()
+        return
+
+    await state.set_state(BookingStates.waiting_category)
+    await callback.message.answer(
+        "Выбери категорию ✂️",
+        reply_markup=categories_picker_keyboard(categories),
     )
     await callback.answer()
 
@@ -310,7 +377,7 @@ async def choose_time(callback: CallbackQuery, state: FSMContext) -> None:
     booking_date = date.fromisoformat(str(booking_date_iso))
     await _safe_edit_booking_message(
         callback,
-        f"Подтверди запись:\n{booking_date.strftime('%d.%m.%Y')} в {time_slot}",
+        f"Подтверди запись:\n{_human_booking_date(booking_date)} в {time_slot}",
         reply_markup=confirm_booking_keyboard(),
     )
     await callback.answer()
@@ -437,7 +504,8 @@ async def confirm_or_back(callback: CallbackQuery, state: FSMContext) -> None:
         )
 
     await callback.message.answer(
-        f"{user_name}, ты записан на {appointment.date.strftime('%d.%m.%Y')} в {appointment.start_time.strftime('%H:%M')}",
+        "Готово, ты записан! ✅\n"
+        f"Ты записан на {_human_booking_date(appointment.date)} в {appointment.start_time.strftime('%H:%M')}",
         reply_markup=menu_keyboard_for_role(user.role if user else "client"),
     )
     await callback.answer()

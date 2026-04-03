@@ -45,9 +45,9 @@ RU_MONTHS_GEN = {
 def _format_date_button_text(d: date, today: date | None = None) -> str:
     today = today or date.today()
     if d == today:
-        return f"Сегодня, {d.day} {RU_MONTHS_GEN[d.month]}"
+        return "Сегодня"
     if d == today + timedelta(days=1):
-        return f"Завтра, {d.day} {RU_MONTHS_GEN[d.month]}"
+        return "Завтра"
     return f"{RU_WEEKDAY_ABBR[d.weekday()]}, {d.day} {RU_MONTHS_GEN[d.month]}"
 
 

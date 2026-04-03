@@ -29,24 +29,32 @@ class WorkScheduleRepository:
     async def get_latest(self) -> Optional[WorkScheduleModel]:
         def _op() -> Optional[dict]:
             client = get_supabase_client()
-            # Новая схема хранит lunch_time, но для обратной совместимости
-            # делаем fallback к старому select, если колонки еще не добавлены.
+            # Новая схема: lunch_time. Делаем каскадный fallback для старых схем.
             try:
                 res = (
                     client.table("work_schedule")
-                    .select("weekdays,start_time,end_time,lunch_time,lunch_start,created_at")
+                    .select("weekdays,start_time,end_time,lunch_time,created_at")
                     .order("created_at", desc=True)
                     .limit(1)
                     .execute()
                 )
             except Exception:
-                res = (
-                    client.table("work_schedule")
-                    .select("weekdays,start_time,end_time,created_at")
-                    .order("created_at", desc=True)
-                    .limit(1)
-                    .execute()
-                )
+                try:
+                    res = (
+                        client.table("work_schedule")
+                        .select("weekdays,start_time,end_time,lunch_start,created_at")
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
+                except Exception:
+                    res = (
+                        client.table("work_schedule")
+                        .select("weekdays,start_time,end_time,created_at")
+                        .order("created_at", desc=True)
+                        .limit(1)
+                        .execute()
+                    )
             return res.data[0] if res.data else None
 
         row = await asyncio.to_thread(_op)
