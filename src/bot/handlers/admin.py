@@ -9,7 +9,9 @@
 
 from __future__ import annotations
 
+import calendar
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -34,6 +36,7 @@ services_repo = ServicesRepository()
 work_schedule_repo = WorkScheduleRepository()
 schedule_service = ScheduleService()
 ADMIN_INLINE_MESSAGE_ID_KEY = "admin_inline_message_id"
+MONTHLY_PREFIX = "admin_monthly"
 
 async def _safe_edit_admin_panel(
     callback: CallbackQuery,
@@ -338,7 +341,7 @@ async def set_work_schedule(message: Message, state: FSMContext) -> None:
     parts = (message.text or "").strip().split()
     # UI-вариант: без аргументов.
     if len(parts) == 1:
-        await _send_or_replace_schedule_panel(message, state, "Что хочешь изменить?")
+        await _open_month_overview_message(message, state, date.today().year, date.today().month)
         return
 
     # Legacy-вариант: /set_schedule 1,2,3,4,5 10:00 18:00
@@ -761,5 +764,614 @@ async def admin_schedule_lunch_time(callback: CallbackQuery, state: FSMContext) 
         f"Обед: {lunch_t.strftime('%H:%M')} — {lunch_end_t.strftime('%H:%M')}\n"
         f"Выходные: {_format_off_days_line(selected_weekdays)}",
         reply_markup=_schedule_entry_keyboard(),
+    )
+    await safe_callback_answer(callback)
+
+
+def _month_title(year: int, month: int) -> str:
+    months = {
+        1: "ЯНВАРЬ",
+        2: "ФЕВРАЛЬ",
+        3: "МАРТ",
+        4: "АПРЕЛЬ",
+        5: "МАЙ",
+        6: "ИЮНЬ",
+        7: "ИЮЛЬ",
+        8: "АВГУСТ",
+        9: "СЕНТЯБРЬ",
+        10: "ОКТЯБРЬ",
+        11: "НОЯБРЬ",
+        12: "ДЕКАБРЬ",
+    }
+    return f"{months.get(month, str(month))} {year}"
+
+
+def _month_key(year: int, month: int) -> str:
+    return f"{year:04d}-{month:02d}"
+
+
+def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
+    base = year * 12 + (month - 1) + delta
+    return base // 12, (base % 12) + 1
+
+
+def _month_overview_keyboard(year: int, month: int, has_schedule: bool) -> InlineKeyboardMarkup:
+    prev_year, prev_month = _shift_month(year, month, -1)
+    next_year, next_month = _shift_month(year, month, 1)
+    action_text = "Редактировать" if has_schedule else "+ Добавить график"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=action_text,
+                    callback_data=f"{MONTHLY_PREFIX}:edit_mode:{year:04d}-{month:02d}",
+                ),
+                InlineKeyboardButton(
+                    text="Следующий месяц →",
+                    callback_data=f"{MONTHLY_PREFIX}:overview:{next_year:04d}-{next_month:02d}",
+                ),
+            ],
+            [
+                InlineKeyboardButton(
+                    text="← Предыдущий месяц",
+                    callback_data=f"{MONTHLY_PREFIX}:overview:{prev_year:04d}-{prev_month:02d}",
+                )
+            ],
+        ]
+    )
+
+
+def _edit_mode_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    ym = f"{year:04d}-{month:02d}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Весь месяц сразу 📅", callback_data=f"{MONTHLY_PREFIX}:mode:full_month:{ym}")],
+            [InlineKeyboardButton(text="По неделям 📆", callback_data=f"{MONTHLY_PREFIX}:mode:by_weeks:{ym}")],
+            [InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:overview:{ym}")],
+        ]
+    )
+
+
+def _weekday_pick_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    ym = f"{year:04d}-{month:02d}"
+    items = [("ПН", 0), ("ВТ", 1), ("СР", 2), ("ЧТ", 3), ("ПТ", 4), ("СБ", 5), ("ВС", 6)]
+    rows: list[list[InlineKeyboardButton]] = []
+    rows.append(
+        [
+            InlineKeyboardButton(text=items[i][0], callback_data=f"{MONTHLY_PREFIX}:pick_weekday:{ym}:{items[i][1]}")
+            for i in range(5)
+        ]
+    )
+    rows.append(
+        [
+            InlineKeyboardButton(text=items[5][0], callback_data=f"{MONTHLY_PREFIX}:pick_weekday:{ym}:{items[5][1]}"),
+            InlineKeyboardButton(text=items[6][0], callback_data=f"{MONTHLY_PREFIX}:pick_weekday:{ym}:{items[6][1]}"),
+        ]
+    )
+    rows.append([InlineKeyboardButton(text="✓ Сохранить месяц", callback_data=f"{MONTHLY_PREFIX}:save_month:{ym}")])
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:edit_mode:{ym}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _bool_day_keyboard(year: int, month: int, day_key: str) -> InlineKeyboardMarkup:
+    ym = f"{year:04d}-{month:02d}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✓ Да", callback_data=f"{MONTHLY_PREFIX}:work_yes:{ym}:{day_key}"),
+                InlineKeyboardButton(text="❌ Нет (выходной)", callback_data=f"{MONTHLY_PREFIX}:work_no:{ym}:{day_key}"),
+            ],
+            [InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:back_pick_day:{ym}")],
+        ]
+    )
+
+
+def _time_rows_keyboard(times: list[str], action: str, year: int, month: int, day_key: str) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    for i in range(0, len(times), 4):
+        row = times[i : i + 4]
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=t,
+                    callback_data=f"{MONTHLY_PREFIX}:{action}:{year:04d}-{month:02d}:{day_key}:{t}",
+                )
+                for t in row
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:back_pick_day:{year:04d}-{month:02d}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _day_done_keyboard(year: int, month: int, day_key: str) -> InlineKeyboardMarkup:
+    ym = f"{year:04d}-{month:02d}"
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✓ Сохранить и дальше", callback_data=f"{MONTHLY_PREFIX}:day_done:{ym}:{day_key}")],
+            [InlineKeyboardButton(text="← Вернуться к выбору дня", callback_data=f"{MONTHLY_PREFIX}:back_pick_day:{ym}")],
+        ]
+    )
+
+
+def _time_options_15m(start_hhmm: str = "08:00", end_hhmm: str = "21:00") -> list[str]:
+    start_dt = datetime.strptime(start_hhmm, "%H:%M")
+    end_dt = datetime.strptime(end_hhmm, "%H:%M")
+    out: list[str] = []
+    current = start_dt
+    while current <= end_dt:
+        out.append(current.strftime("%H:%M"))
+        current += timedelta(minutes=15)
+    return out
+
+
+def _day_title(day_key: str) -> str:
+    names = {
+        "monday": "ПОНЕДЕЛЬНИКА",
+        "tuesday": "ВТОРНИКА",
+        "wednesday": "СРЕДЫ",
+        "thursday": "ЧЕТВЕРГА",
+        "friday": "ПЯТНИЦЫ",
+        "saturday": "СУББОТЫ",
+        "sunday": "ВОСКРЕСЕНЬЯ",
+    }
+    return names.get(day_key, day_key.upper())
+
+
+def _weekday_key_by_num(num: int) -> str:
+    return {
+        0: "monday",
+        1: "tuesday",
+        2: "wednesday",
+        3: "thursday",
+        4: "friday",
+        5: "saturday",
+        6: "sunday",
+    }[num]
+
+
+def _week_ranges(year: int, month: int) -> list[tuple[int, date, date]]:
+    last_day = calendar.monthrange(year, month)[1]
+    ranges: list[tuple[int, date, date]] = []
+    week_number = 1
+    day = 1
+    while day <= last_day:
+        start = date(year, month, day)
+        end = date(year, month, min(day + 6, last_day))
+        ranges.append((week_number, start, end))
+        week_number += 1
+        day += 7
+    return ranges
+
+
+def _week_pick_keyboard(year: int, month: int) -> InlineKeyboardMarkup:
+    ym = f"{year:04d}-{month:02d}"
+    rows: list[list[InlineKeyboardButton]] = []
+    for week_number, start_d, end_d in _week_ranges(year, month):
+        text = f"Неделя {week_number} ({start_d.day}-{end_d.day})"
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=text,
+                    callback_data=f"{MONTHLY_PREFIX}:pick_week:{ym}:{week_number}",
+                )
+            ]
+        )
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:edit_mode:{ym}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _day_pick_in_week_keyboard(year: int, month: int, week_number: int) -> InlineKeyboardMarkup:
+    ym = f"{year:04d}-{month:02d}"
+    rows: list[list[InlineKeyboardButton]] = []
+    week_map = _week_ranges(year, month)
+    target = next((w for w in week_map if w[0] == week_number), None)
+    if target is None:
+        return InlineKeyboardMarkup(
+            inline_keyboard=[[InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:mode:by_weeks:{ym}")]]
+        )
+    _, start_d, end_d = target
+    labels = ["ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ", "ВС"]
+    days: list[tuple[str, date]] = []
+    cur = start_d
+    while cur <= end_d:
+        days.append((labels[cur.weekday()], cur))
+        cur += timedelta(days=1)
+
+    row: list[InlineKeyboardButton] = []
+    for idx, (wd, d) in enumerate(days):
+        row.append(
+            InlineKeyboardButton(
+                text=f"{wd} {d.day}",
+                callback_data=f"{MONTHLY_PREFIX}:pick_date:{ym}:{d.isoformat()}",
+            )
+        )
+        if (idx + 1) % 4 == 0:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton(text="✓ Сохранить месяц", callback_data=f"{MONTHLY_PREFIX}:save_month:{ym}")])
+    rows.append([InlineKeyboardButton(text="← Назад", callback_data=f"{MONTHLY_PREFIX}:mode:by_weeks:{ym}")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _month_overview_text(year: int, month: int) -> tuple[str, bool]:
+    monthly = await work_schedule_repo.get_month_schedule(_month_key(year, month))
+    if monthly is None:
+        text = f"📅 {_month_title(year, month)}\n\n❌ График не добавлен"
+        return text, False
+    text = (
+        f"📅 {_month_title(year, month)}\n\n"
+        f"Режим: {'Весь месяц' if monthly.edit_mode == 'full_month' else 'По неделям'}\n"
+        "✅ График добавлен"
+    )
+    return text, True
+
+
+async def _open_month_overview_message(message: Message, state: FSMContext, year: int, month: int) -> None:
+    text, has_schedule = await _month_overview_text(year, month)
+    await state.set_state(AdminScheduleStates.waiting_month_overview)
+    await state.update_data(monthly_year=year, monthly_month=month)
+    await _send_or_replace_schedule_panel(
+        message,
+        state,
+        text,
+    )
+    data = await state.get_data()
+    msg_id = data.get(ADMIN_INLINE_MESSAGE_ID_KEY)
+    if isinstance(msg_id, int):
+        try:
+            await message.bot.edit_message_reply_markup(
+                chat_id=message.chat.id,
+                message_id=msg_id,
+                reply_markup=_month_overview_keyboard(year, month, has_schedule),
+            )
+        except Exception:
+            pass
+
+
+async def _open_month_overview_callback(callback: CallbackQuery, state: FSMContext, year: int, month: int) -> None:
+    text, has_schedule = await _month_overview_text(year, month)
+    await state.set_state(AdminScheduleStates.waiting_month_overview)
+    await state.update_data(monthly_year=year, monthly_month=month)
+    await _safe_edit_admin_panel(callback, text, reply_markup=_month_overview_keyboard(year, month, has_schedule))
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:overview:"))
+async def monthly_overview(callback: CallbackQuery, state: FSMContext) -> None:
+    payload = callback.data.split(":")[-1]
+    y_s, m_s = payload.split("-")
+    await _open_month_overview_callback(callback, state, int(y_s), int(m_s))
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:edit_mode:"))
+async def monthly_edit_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    payload = callback.data.split(":")[-1]
+    y_s, m_s = payload.split("-")
+    year, month = int(y_s), int(m_s)
+    await state.set_state(AdminScheduleStates.waiting_edit_mode)
+    await state.update_data(monthly_year=year, monthly_month=month, monthly_mode=None, monthly_draft={})
+    await _safe_edit_admin_panel(
+        callback,
+        f"🔧 РЕДАКТИРОВАНИЕ ГРАФИКА\n{_month_title(year, month)}\n\nКак редактировать?",
+        reply_markup=_edit_mode_keyboard(year, month),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:mode:"))
+async def monthly_select_mode(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = callback.data.split(":")
+    mode = parts[2]
+    y_s, m_s = parts[3].split("-")
+    year, month = int(y_s), int(m_s)
+    await state.update_data(monthly_mode=mode, monthly_year=year, monthly_month=month, monthly_draft={})
+    if mode == "full_month":
+        await state.set_state(AdminScheduleStates.waiting_month_weekday_pick)
+        await _safe_edit_admin_panel(
+            callback,
+            f"📋 ГРАФИК НА ВЕСЬ МЕСЯЦ\n{_month_title(year, month)}\n\nВыберите день недели:",
+            reply_markup=_weekday_pick_keyboard(year, month),
+        )
+    else:
+        await state.set_state(AdminScheduleStates.waiting_week_pick)
+        await _safe_edit_admin_panel(
+            callback,
+            f"📆 РЕДАКТИРОВАНИЕ ПО НЕДЕЛЯМ\n{_month_title(year, month)}\n\nВыберите неделю:",
+            reply_markup=_week_pick_keyboard(year, month),
+        )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:pick_week:"))
+async def monthly_pick_week(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, week_s = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month, week_number = int(y_s), int(m_s), int(week_s)
+    await state.set_state(AdminScheduleStates.waiting_day_pick)
+    await state.update_data(monthly_year=year, monthly_month=month, monthly_week=week_number)
+    await _safe_edit_admin_panel(
+        callback,
+        f"📆 НЕДЕЛЯ {week_number} ({_month_title(year, month)})\n\nКакой день редактировать?",
+        reply_markup=_day_pick_in_week_keyboard(year, month, week_number),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:pick_date:"))
+async def monthly_pick_date(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, date_iso = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    picked = date.fromisoformat(date_iso)
+    day_key = picked.isoformat()
+    await state.set_state(AdminScheduleStates.waiting_day_working_flag)
+    await state.update_data(monthly_current_day=day_key, monthly_year=year, monthly_month=month)
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ ДНЯ ({picked.strftime('%d.%m.%Y')})\n\nРаботает ли в этот день?",
+        reply_markup=_bool_day_keyboard(year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:pick_weekday:"))
+async def monthly_pick_weekday(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, weekday_s = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    day_key = _weekday_key_by_num(int(weekday_s))
+    await state.set_state(AdminScheduleStates.waiting_day_working_flag)
+    await state.update_data(monthly_current_day=day_key, monthly_year=year, monthly_month=month)
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ {_day_title(day_key)}\n\nРаботает ли в этот день?",
+        reply_markup=_bool_day_keyboard(year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:work_no:"))
+async def monthly_day_off(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, day_key = callback.data.split(":")
+    data = await state.get_data()
+    draft = dict(data.get("monthly_draft") or {})
+    draft[day_key] = {"is_day_off": True}
+    await state.update_data(monthly_draft=draft)
+    await _safe_edit_admin_panel(
+        callback,
+        "День отмечен как выходной.\n\nВыберите действие:",
+        reply_markup=_day_done_keyboard(int(ym.split("-")[0]), int(ym.split("-")[1]), day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:work_yes:"))
+async def monthly_day_work_yes(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, day_key = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    await state.set_state(AdminScheduleStates.waiting_start_time)
+    times = _time_options_15m()
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ {_day_title(day_key)}\n\nВремя начала смены?",
+        reply_markup=_time_rows_keyboard(times, "set_start", year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_start:"))
+async def monthly_set_start(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, day_key, start_hhmm = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    draft = dict(data.get("monthly_draft") or {})
+    day_data = dict(draft.get(day_key) or {})
+    day_data["start_time"] = start_hhmm
+    draft[day_key] = day_data
+    await state.update_data(monthly_draft=draft)
+    await state.set_state(AdminScheduleStates.waiting_end_time)
+    times = [t for t in _time_options_15m() if t > start_hhmm]
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ {_day_title(day_key)}\nНачало: {start_hhmm} ✓\n\nВремя конца смены?",
+        reply_markup=_time_rows_keyboard(times, "set_end", year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_end:"))
+async def monthly_set_end(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, day_key, end_hhmm = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    draft = dict(data.get("monthly_draft") or {})
+    day_data = dict(draft.get(day_key) or {})
+    start_hhmm = str(day_data.get("start_time") or "")
+    if not start_hhmm or end_hhmm <= start_hhmm:
+        await safe_callback_answer(callback, "❌ Ошибка: конец не может быть раньше начала.", show_alert=True)
+        return
+    day_data["end_time"] = end_hhmm
+    draft[day_key] = day_data
+    await state.update_data(monthly_draft=draft)
+    await state.set_state(AdminScheduleStates.waiting_lunch_time)
+    times = [t for t in _time_options_15m() if start_hhmm <= t < end_hhmm]
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ {_day_title(day_key)}\nНачало: {start_hhmm} ✓\nКонец: {end_hhmm} ✓\n\nВремя обеда (начало)?",
+        reply_markup=_time_rows_keyboard(times, "set_lunch_start", year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_lunch_start:"))
+async def monthly_set_lunch_start(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, day_key, lunch_start = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    draft = dict(data.get("monthly_draft") or {})
+    day_data = dict(draft.get(day_key) or {})
+    day_data["lunch_start"] = lunch_start
+    draft[day_key] = day_data
+    await state.update_data(monthly_draft=draft)
+    await state.set_state(AdminScheduleStates.waiting_lunch_end_time)
+    end_hhmm = str(day_data.get("end_time") or "")
+    times = [t for t in _time_options_15m() if lunch_start < t <= end_hhmm]
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ {_day_title(day_key)}\nОбед начало: {lunch_start} ✓\n\nВремя обеда (конец)?",
+        reply_markup=_time_rows_keyboard(times, "set_lunch_end", year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:set_lunch_end:"))
+async def monthly_set_lunch_end(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, day_key, lunch_end = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    draft = dict(data.get("monthly_draft") or {})
+    day_data = dict(draft.get(day_key) or {})
+    start_hhmm = str(day_data.get("start_time") or "")
+    end_hhmm = str(day_data.get("end_time") or "")
+    lunch_start = str(day_data.get("lunch_start") or "")
+    if not (start_hhmm and end_hhmm and lunch_start):
+        await safe_callback_answer(callback, "Недостаточно данных.", show_alert=True)
+        return
+    if not (start_hhmm <= lunch_start < lunch_end <= end_hhmm):
+        await safe_callback_answer(callback, "❌ Ошибка: обед должен быть внутри смены.", show_alert=True)
+        return
+    day_data.update(
+        {
+            "is_day_off": False,
+            "lunch_end": lunch_end,
+        }
+    )
+    draft[day_key] = day_data
+    await state.update_data(monthly_draft=draft)
+    await _safe_edit_admin_panel(
+        callback,
+        f"⏰ РЕДАКТИРОВАНИЕ {_day_title(day_key)}\n"
+        f"Начало: {start_hhmm} ✓\n"
+        f"Конец: {end_hhmm} ✓\n"
+        f"Обед: {lunch_start} - {lunch_end} ✓",
+        reply_markup=_day_done_keyboard(year, month, day_key),
+    )
+    await safe_callback_answer(callback)
+
+
+def _to_weekly_payload(draft: dict[str, Any]) -> dict[str, Any]:
+    return {"days_of_week": draft}
+
+
+def _to_weeks_payload(year: int, month: int, draft: dict[str, Any]) -> dict[str, Any]:
+    weeks: list[dict[str, Any]] = []
+    for week_number, start_d, end_d in _week_ranges(year, month):
+        days: dict[str, Any] = {}
+        cur = start_d
+        while cur <= end_d:
+            iso = cur.isoformat()
+            day = dict(draft.get(iso) or {"is_day_off": True})
+            day["date"] = iso
+            days[str(cur.weekday())] = day
+            cur += timedelta(days=1)
+        weeks.append(
+            {
+                "week_number": week_number,
+                "start_date": start_d.isoformat(),
+                "end_date": end_d.isoformat(),
+                "days": days,
+            }
+        )
+    return {"weeks": weeks}
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:day_done:"))
+async def monthly_day_done(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym, _day_key = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    mode = str(data.get("monthly_mode") or "full_month")
+    draft = dict(data.get("monthly_draft") or {})
+    if mode == "full_month":
+        await state.set_state(AdminScheduleStates.waiting_month_weekday_pick)
+        await _safe_edit_admin_panel(
+            callback,
+            f"📋 ГРАФИК НА ВЕСЬ МЕСЯЦ\n{_month_title(year, month)}\n\nВыберите следующий день недели:",
+            reply_markup=_weekday_pick_keyboard(year, month),
+        )
+        await safe_callback_answer(callback)
+        return
+
+    if mode == "by_weeks":
+        week_number = int(data.get("monthly_week") or 1)
+        await state.set_state(AdminScheduleStates.waiting_day_pick)
+        await _safe_edit_admin_panel(
+            callback,
+            f"📆 НЕДЕЛЯ {week_number} ({_month_title(year, month)})\n\nКакой день редактировать?",
+            reply_markup=_day_pick_in_week_keyboard(year, month, week_number),
+        )
+        await safe_callback_answer(callback)
+        return
+
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:back_pick_day:"))
+async def monthly_back_pick_day(callback: CallbackQuery, state: FSMContext) -> None:
+    ym = callback.data.split(":")[-1]
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    mode = str(data.get("monthly_mode") or "full_month")
+    if mode == "full_month":
+        await state.set_state(AdminScheduleStates.waiting_month_weekday_pick)
+        await _safe_edit_admin_panel(
+            callback,
+            f"📋 ГРАФИК НА ВЕСЬ МЕСЯЦ\n{_month_title(year, month)}\n\nВыберите день недели:",
+            reply_markup=_weekday_pick_keyboard(year, month),
+        )
+    else:
+        week_number = int(data.get("monthly_week") or 1)
+        await state.set_state(AdminScheduleStates.waiting_day_pick)
+        await _safe_edit_admin_panel(
+            callback,
+            f"📆 НЕДЕЛЯ {week_number} ({_month_title(year, month)})\n\nКакой день редактировать?",
+            reply_markup=_day_pick_in_week_keyboard(year, month, week_number),
+        )
+    await safe_callback_answer(callback)
+
+
+@router.callback_query(F.data.startswith(f"{MONTHLY_PREFIX}:save_month:"))
+async def monthly_save_month(callback: CallbackQuery, state: FSMContext) -> None:
+    _, _, _, ym = callback.data.split(":")
+    y_s, m_s = ym.split("-")
+    year, month = int(y_s), int(m_s)
+    data = await state.get_data()
+    draft = dict(data.get("monthly_draft") or {})
+    mode = str(data.get("monthly_mode") or "full_month")
+    payload = _to_weekly_payload(draft) if mode == "full_month" else _to_weeks_payload(year, month, draft)
+    await work_schedule_repo.upsert_month_schedule(_month_key(year, month), mode, payload)
+    await state.set_state(AdminPanelStates.in_menu)
+    await _safe_edit_admin_panel(
+        callback,
+        f"✅ ГРАФИК СОХРАНЁН\n\nВаш график на {_month_title(year, month)}.",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="← К главному меню",
+                        callback_data=f"{MONTHLY_PREFIX}:overview:{year:04d}-{month:02d}",
+                    )
+                ]
+            ]
+        ),
     )
     await safe_callback_answer(callback)

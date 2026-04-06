@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, time
-from typing import List, Optional, Set
+from datetime import date, datetime, time
+from typing import Any, List, Optional, Set
 
 from src.infra.db.supabase_client import get_supabase_client
 
@@ -23,6 +23,22 @@ class WorkScheduleModel:
     start_time: time
     end_time: time
     lunch_time: Optional[time] = None
+
+
+@dataclass(frozen=True)
+class DayScheduleModel:
+    is_day_off: bool
+    start_time: Optional[time] = None
+    end_time: Optional[time] = None
+    lunch_start: Optional[time] = None
+    lunch_end: Optional[time] = None
+
+
+@dataclass(frozen=True)
+class MonthlyWorkScheduleModel:
+    month: str  # YYYY-MM
+    edit_mode: str  # full_month | by_weeks
+    schedule_json: dict[str, Any]
 
 
 class WorkScheduleRepository:
@@ -123,4 +139,128 @@ class WorkScheduleRepository:
                     client.table("work_schedule").insert(payload).execute()
 
         await asyncio.to_thread(_op)
+
+    @staticmethod
+    def _parse_time(value: Any) -> Optional[time]:
+        if value is None:
+            return None
+        raw = str(value).strip()
+        if not raw:
+            return None
+        return datetime.strptime(raw[:5], "%H:%M").time()
+
+    @staticmethod
+    def _weekday_key(py_weekday: int) -> str:
+        keys = {
+            0: "monday",
+            1: "tuesday",
+            2: "wednesday",
+            3: "thursday",
+            4: "friday",
+            5: "saturday",
+            6: "sunday",
+        }
+        return keys[py_weekday]
+
+    async def get_month_schedule(self, month: str) -> Optional[MonthlyWorkScheduleModel]:
+        def _op() -> Optional[dict[str, Any]]:
+            client = get_supabase_client()
+            res = (
+                client.table("work_schedule_monthly")
+                .select("month,edit_mode,schedule_json,updated_at")
+                .eq("month", month)
+                .order("updated_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return res.data[0] if res.data else None
+
+        try:
+            row = await asyncio.to_thread(_op)
+        except Exception:
+            # Таблица может отсутствовать до миграции.
+            return None
+
+        if not row:
+            return None
+        return MonthlyWorkScheduleModel(
+            month=str(row.get("month") or month),
+            edit_mode=str(row.get("edit_mode") or "full_month"),
+            schedule_json=dict(row.get("schedule_json") or {}),
+        )
+
+    async def upsert_month_schedule(self, month: str, edit_mode: str, schedule_json: dict[str, Any]) -> None:
+        payload = {
+            "month": month,
+            "edit_mode": edit_mode,
+            "schedule_json": schedule_json,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+
+        def _op() -> None:
+            client = get_supabase_client()
+            existing = (
+                client.table("work_schedule_monthly")
+                .select("id")
+                .eq("month", month)
+                .order("updated_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            row = (existing.data or [None])[0]
+            if row and row.get("id") is not None:
+                client.table("work_schedule_monthly").update(payload).eq("id", int(row["id"])).execute()
+            else:
+                client.table("work_schedule_monthly").insert(payload).execute()
+
+        await asyncio.to_thread(_op)
+
+    async def get_day_schedule(self, target_date: date) -> Optional[DayScheduleModel]:
+        month_key = target_date.strftime("%Y-%m")
+        monthly = await self.get_month_schedule(month_key)
+        if monthly is None:
+            return None
+
+        data = monthly.schedule_json or {}
+        weekday_key = self._weekday_key(target_date.weekday())
+
+        def _from_day_payload(day_payload: dict[str, Any]) -> DayScheduleModel:
+            is_day_off = bool(day_payload.get("is_day_off"))
+            start_t = self._parse_time(day_payload.get("start_time"))
+            end_t = self._parse_time(day_payload.get("end_time"))
+            lunch_start = self._parse_time(day_payload.get("lunch_start"))
+            lunch_end = self._parse_time(day_payload.get("lunch_end"))
+            if is_day_off:
+                return DayScheduleModel(is_day_off=True)
+            return DayScheduleModel(
+                is_day_off=False,
+                start_time=start_t,
+                end_time=end_t,
+                lunch_start=lunch_start,
+                lunch_end=lunch_end,
+            )
+
+        if monthly.edit_mode == "full_month":
+            days_of_week = data.get("days_of_week") or {}
+            payload = days_of_week.get(weekday_key)
+            if not isinstance(payload, dict):
+                return None
+            return _from_day_payload(payload)
+
+        weeks = data.get("weeks") or []
+        iso_target = target_date.isoformat()
+        for week in weeks:
+            if not isinstance(week, dict):
+                continue
+            days = week.get("days") or {}
+            if not isinstance(days, dict):
+                continue
+            for _, day_payload in days.items():
+                if not isinstance(day_payload, dict):
+                    continue
+                if str(day_payload.get("date") or "") == iso_target:
+                    return _from_day_payload(day_payload)
+
+        # fallback для by_weeks: если конкретная дата не заполнена, считаем выходным
+        return DayScheduleModel(is_day_off=True)
 

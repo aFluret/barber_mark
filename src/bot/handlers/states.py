@@ -29,9 +29,16 @@ class AdminPanelStates(StatesGroup):
 
 
 class AdminScheduleStates(StatesGroup):
+    waiting_month_overview = State()
+    waiting_edit_mode = State()
+    waiting_week_pick = State()
+    waiting_day_pick = State()
+    waiting_month_weekday_pick = State()
+    waiting_day_working_flag = State()
     waiting_weekdays = State()
     waiting_start_time = State()
     waiting_end_time = State()
     waiting_lunch_time = State()
+    waiting_lunch_end_time = State()
     waiting_confirm = State()
 

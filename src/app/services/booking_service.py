@@ -127,8 +127,6 @@ class BookingService:
         today = now_local.date()
 
         service = await self._services_repo.get_by_id(service_id)
-        schedule = await self._schedule_service.get_effective_schedule()
-
         first_day = date(year, month, 1)
         last_day = date(year, month, calendar.monthrange(year, month)[1])
         intervals_by_date = await self._appointments_repo.list_confirmed_intervals_range(first_day, last_day)
@@ -140,11 +138,16 @@ class BookingService:
                 out.append(cur)
                 cur += timedelta(days=1)
                 continue
-            if cur.weekday() not in schedule.weekdays:
+            day_schedule = await self._schedule_service.get_day_schedule_for_date(cur)
+            if day_schedule.is_day_off:
                 out.append(cur)
                 cur += timedelta(days=1)
                 continue
-            if cur == today and now_local.time() >= schedule.end_time:
+            if day_schedule.end_time is None:
+                out.append(cur)
+                cur += timedelta(days=1)
+                continue
+            if cur == today and now_local.time() >= day_schedule.end_time:
                 out.append(cur)
                 cur += timedelta(days=1)
                 continue
@@ -152,8 +155,8 @@ class BookingService:
             if service is None:
                 candidates: list[str] = []
             else:
-                candidates = self._schedule_service.candidate_slots_for_date_sync(
-                    cur, service.duration_minutes, schedule
+                candidates = self._schedule_service.candidate_slots_for_day_schedule_sync(
+                    cur, service.duration_minutes, day_schedule
                 )
 
             if cur == today:

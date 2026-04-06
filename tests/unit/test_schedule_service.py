@@ -13,7 +13,7 @@ from datetime import date, time, timedelta
 from src.app.services.booking_service import BookingService
 from src.app.services.schedule_service import ScheduleService
 from src.infra.db.models import ServiceModel
-from src.infra.db.repositories.work_schedule_repository import WorkScheduleModel
+from src.infra.db.repositories.work_schedule_repository import DayScheduleModel, WorkScheduleModel
 
 
 class _DummyWorkScheduleRepo:
@@ -23,6 +23,9 @@ class _DummyWorkScheduleRepo:
             start_time=time(10, 0),
             end_time=time(20, 0),
         )
+
+    async def get_day_schedule(self, target_date: date):
+        return None
 
 
 class _DummyServicesRepo:
@@ -45,6 +48,9 @@ class _DummyCustomLunchScheduleRepo:
             end_time=time(20, 0),
             lunch_time=time(18, 30),
         )
+
+    async def get_day_schedule(self, target_date: date):
+        return None
 
 
 def test_schedule_service_step_and_last_start_duration_60() -> None:
@@ -119,6 +125,9 @@ def test_schedule_service_sunday_allowed_when_in_schedule_weekdays() -> None:
                 end_time=time(20, 0),
             )
 
+        async def get_day_schedule(self, target_date: date):
+            return None
+
     service = ScheduleService()
     service._repo = _RepoWithSunday()
     # 2026-04-05 — воскресенье
@@ -138,3 +147,39 @@ def test_schedule_service_uses_lunch_time_from_schedule() -> None:
     assert "18:30" not in slots
     assert "19:00" not in slots
     assert "19:30" in slots
+
+
+def test_schedule_service_uses_monthly_day_schedule_when_present() -> None:
+    class _RepoMonthlyOnly:
+        async def get_latest(self):
+            return WorkScheduleModel(weekdays={0, 1, 2, 3, 4, 5}, start_time=time(10, 0), end_time=time(20, 0))
+
+        async def get_day_schedule(self, target_date: date):
+            return DayScheduleModel(
+                is_day_off=False,
+                start_time=time(9, 0),
+                end_time=time(12, 0),
+                lunch_start=time(10, 0),
+                lunch_end=time(10, 30),
+            )
+
+    service = ScheduleService()
+    service._repo = _RepoMonthlyOnly()
+    slots = asyncio.run(service.get_candidate_slots_for_date(date(2026, 4, 6), duration_minutes=30))
+    assert "09:00" in slots
+    assert "10:00" not in slots
+    assert "11:30" in slots
+
+
+def test_schedule_service_monthly_day_off_returns_empty_slots() -> None:
+    class _RepoMonthlyDayOff:
+        async def get_latest(self):
+            return WorkScheduleModel(weekdays={0, 1, 2, 3, 4, 5}, start_time=time(10, 0), end_time=time(20, 0))
+
+        async def get_day_schedule(self, target_date: date):
+            return DayScheduleModel(is_day_off=True)
+
+    service = ScheduleService()
+    service._repo = _RepoMonthlyDayOff()
+    slots = asyncio.run(service.get_candidate_slots_for_date(date(2026, 4, 6), duration_minutes=30))
+    assert slots == []

@@ -15,8 +15,8 @@ from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
+from src.app.services.schedule_service import ScheduleService
 from src.infra.config.settings import get_settings
-from src.infra.db.repositories.work_schedule_repository import WorkScheduleRepository
 
 RU_MONTHS_NOM = {
     1: "Январь",
@@ -81,19 +81,15 @@ async def is_date_available(dt: datetime) -> bool:
     if local_date < now_local.date():
         return False
 
-    repo = WorkScheduleRepository()
-    schedule = await repo.get_latest()
-    if schedule is None:
-        weekdays = {0, 1, 2, 3, 4, 5}
-        end_time = datetime.strptime("20:00", "%H:%M").time()
-    else:
-        weekdays = set(schedule.weekdays)
-        end_time = schedule.end_time
-
-    if local_date.weekday() not in weekdays:
+    schedule_service = ScheduleService()
+    day_schedule = await schedule_service.get_day_schedule_for_date(local_date)
+    if day_schedule.is_day_off:
         return False
 
-    if local_date == now_local.date() and now_local.time() >= end_time:
+    if day_schedule.end_time is None:
+        return False
+
+    if local_date == now_local.date() and now_local.time() >= day_schedule.end_time:
         return False
     return True
 

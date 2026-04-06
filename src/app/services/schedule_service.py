@@ -10,7 +10,11 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, time
-from src.infra.db.repositories.work_schedule_repository import WorkScheduleModel, WorkScheduleRepository
+from src.infra.db.repositories.work_schedule_repository import (
+    DayScheduleModel,
+    WorkScheduleModel,
+    WorkScheduleRepository,
+)
 
 
 class ScheduleService:
@@ -53,6 +57,29 @@ class ScheduleService:
     async def get_effective_schedule(self) -> WorkScheduleModel:
         return await self._get_schedule_or_default()
 
+    async def get_day_schedule_for_date(self, target_date: date) -> DayScheduleModel:
+        monthly_day = await self._repo.get_day_schedule(target_date)
+        if monthly_day is not None:
+            return monthly_day
+
+        schedule = await self._get_schedule_or_default()
+        if target_date.weekday() not in schedule.weekdays:
+            return DayScheduleModel(is_day_off=True)
+
+        lunch_start = schedule.lunch_time
+        lunch_end = None
+        if lunch_start is not None:
+            lunch_end = (
+                datetime.combine(target_date, lunch_start) + timedelta(minutes=self.LUNCH_DURATION_MINUTES)
+            ).time()
+        return DayScheduleModel(
+            is_day_off=False,
+            start_time=schedule.start_time,
+            end_time=schedule.end_time,
+            lunch_start=lunch_start,
+            lunch_end=lunch_end,
+        )
+
     def candidate_slots_for_date_sync(
         self,
         target_date: date,
@@ -90,17 +117,53 @@ class ScheduleService:
 
         return out
 
+    def candidate_slots_for_day_schedule_sync(
+        self,
+        target_date: date,
+        duration_minutes: int,
+        day_schedule: DayScheduleModel,
+    ) -> list[str]:
+        if day_schedule.is_day_off:
+            return []
+        if day_schedule.start_time is None or day_schedule.end_time is None:
+            return []
+
+        work_start_dt = datetime.combine(target_date, day_schedule.start_time)
+        work_end_dt = datetime.combine(target_date, day_schedule.end_time)
+        step = timedelta(minutes=duration_minutes)
+
+        last_start_dt = work_end_dt - timedelta(minutes=duration_minutes)
+        if last_start_dt < work_start_dt:
+            return []
+
+        out: list[str] = []
+        current = work_start_dt
+        while current <= last_start_dt:
+            start_t = current.time()
+            end_t = (current + timedelta(minutes=duration_minutes)).time()
+
+            lunch_start = day_schedule.lunch_start
+            lunch_end = day_schedule.lunch_end
+            if lunch_start is not None and lunch_end is not None:
+                if self._intervals_overlap(start_t, end_t, lunch_start, lunch_end):
+                    current += step
+                    continue
+
+            out.append(start_t.strftime("%H:%M"))
+            current += step
+        return out
+
     async def next_working_dates(self, count: int) -> list[date]:
         today = date.today()
-        schedule = await self._get_schedule_or_default()
         out: list[date] = []
         d = today
         while len(out) < count:
-            if d.weekday() in schedule.weekdays:
+            day_schedule = await self.get_day_schedule_for_date(d)
+            if not day_schedule.is_day_off:
                 out.append(d)
             d += timedelta(days=1)
         return out
 
     async def get_candidate_slots_for_date(self, target_date: date, duration_minutes: int) -> list[str]:
-        schedule = await self._get_schedule_or_default()
-        return self.candidate_slots_for_date_sync(target_date, duration_minutes, schedule)
+        day_schedule = await self.get_day_schedule_for_date(target_date)
+        return self.candidate_slots_for_day_schedule_sync(target_date, duration_minutes, day_schedule)
